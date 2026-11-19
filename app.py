@@ -465,7 +465,7 @@ with tab_nlp:
     presets = {
         "Select a sample scenario...": "",
         "Scenario 1: EOQ Batch Sizing": "We sell 12,000 units a year. Each order costs $60 to place and holding cost is $2.50 per unit per year. What is our optimal order quantity?",
-        "Scenario 2: All-Units Quantity Discount": "Our annual demand is 5,000 units and ordering cost is $50. The holding rate is 20%. Tier 1: 1-499 units @ $10.00; Tier 2: 500-999 units @ $9.20; Tier 3: 1000+ units @ $8.50. What order quantity minimizes total cost?",
+        "Scenario 2: All-Units Quantity Discount": "Our annual demand is 5,000 units and ordering cost is $60. The holding rate is 20%. Tier 1: 1-499 units @ $12.00; Tier 2: 500-999 units @ $11.50; Tier 3: 1000+ units @ $11.00. What order quantity minimizes total cost?",
         "Scenario 3: Safety Stock & Continuous ROP": "Our average daily demand is 80 units with a standard deviation of 12 units. Supplier lead time is 5 days. We target a 95% cycle service level. What should our reorder point and safety stock be?",
         "Scenario 4: Fixed-Period Review (Periodic OUTL)": "We review store inventory every 14 days. Supplier delivery lead time is 7 days. Average daily demand is 30 units with a std dev of 6 units. Target service level is 95%. Current inventory on-hand is 180 units and on-order is 50 units. How much should we order today?",
         "Scenario 5: Seasonal Newsvendor": "For our holiday ski jacket, retail selling price is $120, wholesale unit cost is $50, and salvage clearance price is $20. Forecasted seasonal demand is normally distributed with mean 600 units and std dev 120 units. What is the optimal order quantity?",
@@ -774,14 +774,14 @@ with tab_direct:
         st.subheader("Quantity Discount Optimizer")
         c1, c2, c3 = st.columns(3)
         d_val = c1.number_input("Annual Demand", min_value=1.0, value=5000.0, step=100.0)
-        s_val = c2.number_input("Order Cost ($)", min_value=0.1, value=50.0, step=5.0)
+        s_val = c2.number_input("Order Cost ($)", min_value=0.1, value=60.0, step=5.0)
         hr_val = c3.number_input("Holding Rate (%)", min_value=1.0, max_value=100.0, value=20.0) / 100.0
 
         st.markdown("**Discount Tiers:**")
         t1, t2, t3 = st.columns(3)
-        p1 = t1.number_input("Tier 1 (1 - 499) Price ($)", value=10.0)
-        p2 = t2.number_input("Tier 2 (500 - 999) Price ($)", value=9.20)
-        p3 = t3.number_input("Tier 3 (1000+) Price ($)", value=8.50)
+        p1 = t1.number_input("Tier 1 (1 - 499) Price ($)", value=12.0)
+        p2 = t2.number_input("Tier 2 (500 - 999) Price ($)", value=11.50)
+        p3 = t3.number_input("Tier 3 (1000+) Price ($)", value=11.00)
 
         schedule = [
             {"min_qty": 1, "max_qty": 499, "unit_cost": p1},
