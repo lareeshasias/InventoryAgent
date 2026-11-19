@@ -68,6 +68,7 @@ class InventoryDecisionAgent:
     MODEL_SAFETY_STOCK_ROP = "SAFETY_STOCK_ROP"
     MODEL_FIXED_PERIOD_REVIEW = "FIXED_PERIOD_REVIEW"
     MODEL_NEWSVENDOR = "NEWSVENDOR"
+    MODEL_INVENTORY_CLASSIFICATION = "INVENTORY_CLASSIFICATION"
     MODEL_UNKNOWN = "UNKNOWN"
 
     MODEL_NAMES = {
@@ -76,6 +77,7 @@ class InventoryDecisionAgent:
         MODEL_SAFETY_STOCK_ROP: "Safety Stock & Continuous Reorder Point (ROP)",
         MODEL_FIXED_PERIOD_REVIEW: "Fixed-Period Review (Periodic Order-Up-To)",
         MODEL_NEWSVENDOR: "Newsvendor (Single-Period Probabilistic)",
+        MODEL_INVENTORY_CLASSIFICATION: "Multicriteria Inventory Classification (Pareto ABC/D)",
         MODEL_UNKNOWN: "Unrecognized Model"
     }
 
@@ -294,8 +296,21 @@ class InventoryDecisionAgent:
             self.MODEL_QUANTITY_DISCOUNT: 0.0,
             self.MODEL_SAFETY_STOCK_ROP: 0.0,
             self.MODEL_FIXED_PERIOD_REVIEW: 0.0,
-            self.MODEL_NEWSVENDOR: 0.0
+            self.MODEL_NEWSVENDOR: 0.0,
+            self.MODEL_INVENTORY_CLASSIFICATION: 0.0
         }
+
+        # 0. Multicriteria Inventory Classification rules
+        if any(w in q_lower for w in [
+            "classification", "classify", "multicriteria", "multi-criteria", "pareto",
+            "abc", "abcd", "sales and hits", "cumulative sales", "pos hits", "hit classification",
+            "sales class", "hits class", "sales score", "hits score"
+        ]):
+            scores[self.MODEL_INVENTORY_CLASSIFICATION] += 4.5
+        if any(w in q_lower for w in ["a – 0-60%", "0-60%", "61-80%", "81-90%", "91-100%", "a=4", "b=3", "c=2", "d=1"]):
+            scores[self.MODEL_INVENTORY_CLASSIFICATION] += 5.0
+        if "csv" in q_lower and any(w in q_lower for w in ["classify", "item number", "hits", "sales"]):
+            scores[self.MODEL_INVENTORY_CLASSIFICATION] += 4.0
 
         # 1. Quantity Discount rules (strongest priority when discount/tier mentioned)
         if any(w in q_lower for w in ["discount", "quantity break", "price break", "volume break", "volume discount", "bracket", "tier", "price schedule"]):
@@ -1120,6 +1135,17 @@ class InventoryDecisionAgent:
             if sigma is None:
                 missing.append("std_demand")
 
+        elif model_id == self.MODEL_INVENTORY_CLASSIFICATION:
+            items_data = None
+            if user_overrides and "items_data" in user_overrides:
+                items_data = user_overrides["items_data"]
+            elif user_overrides and "df" in user_overrides:
+                items_data = user_overrides["df"]
+
+            normalized["items_data"] = items_data
+            if items_data is None:
+                missing.append("items_data (Upload CSV with Item Number, Item Name, UoM, Sales ($), Hits)")
+
         return extracted, normalized, missing
 
     # -----------------------------------------------------------------------
@@ -1135,7 +1161,8 @@ class InventoryDecisionAgent:
             self.MODEL_QUANTITY_DISCOUNT: ("calculate_quantity_discount", tools.calculate_quantity_discount),
             self.MODEL_SAFETY_STOCK_ROP: ("calculate_safety_stock_rop", tools.calculate_safety_stock_rop),
             self.MODEL_FIXED_PERIOD_REVIEW: ("calculate_fixed_period_review", tools.calculate_fixed_period_review),
-            self.MODEL_NEWSVENDOR: ("calculate_newsvendor", tools.calculate_newsvendor)
+            self.MODEL_NEWSVENDOR: ("calculate_newsvendor", tools.calculate_newsvendor),
+            self.MODEL_INVENTORY_CLASSIFICATION: ("calculate_multicriteria_inventory_classification", tools.calculate_multicriteria_inventory_classification)
         }
         if model_id in mapping:
             return mapping[model_id]
@@ -1260,6 +1287,28 @@ class InventoryDecisionAgent:
             else:
                 checks.append(VerificationCheck("Profit Upper Bound", "FAIL", "Expected profit exceeds theoretical maximum."))
                 all_passed = False
+
+        elif model_id == self.MODEL_INVENTORY_CLASSIFICATION:
+            tot_items = results.get("total_items", 0)
+            tot_sales = results.get("total_sales", 0.0)
+            tot_hits = results.get("total_hits", 0.0)
+
+            if tot_items > 0:
+                checks.append(VerificationCheck("Item Count Validity", "PASS", f"Classified {tot_items:,} inventory items successfully."))
+            else:
+                checks.append(VerificationCheck("Item Count Validity", "FAIL", "Dataset contains 0 items."))
+                all_passed = False
+
+            if tot_sales > 0:
+                checks.append(VerificationCheck("Sales Integrity", "PASS", f"Total cumulative sales evaluated: ${tot_sales:,.2f}."))
+            else:
+                checks.append(VerificationCheck("Sales Integrity", "FAIL", "Total sales is zero or invalid."))
+                all_passed = False
+
+            if tot_hits > 0:
+                checks.append(VerificationCheck("Hits Activity Integrity", "PASS", f"Total transaction hits evaluated: {tot_hits:,.0f} picks."))
+            else:
+                checks.append(VerificationCheck("Hits Activity Integrity", "WARN", "Total hits count is zero."))
 
         return (all_passed, checks)
 
@@ -1516,5 +1565,83 @@ class InventoryDecisionAgent:
                 "Invest in demand sensing and pre-season reservations to reduce demand variance (σ)."
             ]
 
+        elif model_id == self.MODEL_INVENTORY_CLASSIFICATION:
+            tot_items = results.get("total_items", 0)
+            tot_sales = results.get("total_sales", 0.0)
+            tot_hits = results.get("total_hits", 0.0)
+            s_sum = results.get("sales_class_summary", {})
+            h_sum = results.get("hits_class_summary", {})
+            f_sum = results.get("final_class_summary", {})
+            mat = results.get("multicriteria_matrix", {})
+
+            summary = (
+                f"**Multicriteria Inventory Classification Completed for {tot_items:,} Items.**\n"
+                f"Total analyzed revenue is **${tot_sales:,.2f}** and total transaction frequency is **{tot_hits:,.0f} POS Hits**.\n"
+                f"- Sales Class (Score A=4, B=3, C=2, D=1) and Hits Class (Score A=4, B=3, C=2, D=1) were calculated separately.\n"
+                f"- Combined Weighted Score = **0.65(Sales Score) + 0.35(Hits Score)**.\n"
+                f"- Final Inventory Classes: **A (4.00-3.25)**: {f_sum.get('A', {}).get('count', 0)} SKUs, "
+                f"**B (3.24-2.50)**: {f_sum.get('B', {}).get('count', 0)} SKUs, "
+                f"**C (2.49-1.75)**: {f_sum.get('C', {}).get('count', 0)} SKUs, "
+                f"**D (< 1.75)**: {f_sum.get('D', {}).get('count', 0)} SKUs."
+            )
+
+            details = (
+                f"### Multicriteria Pareto Classification & Combined Weighted Scoring\n\n"
+                f"#### 1. Final Inventory Classification (Combined Weighted Score = 0.65×Sales + 0.35×Hits):\n"
+                f"- **Class A [4.00 - 3.25]**: {f_sum.get('A', {}).get('count', 0)} SKUs "
+                f"(${f_sum.get('A', {}).get('total_sales', 0):,.2f} | {f_sum.get('A', {}).get('sales_pct', 0):.1f}% of sales)\n"
+                f"- **Class B [3.24 - 2.50]**: {f_sum.get('B', {}).get('count', 0)} SKUs "
+                f"(${f_sum.get('B', {}).get('total_sales', 0):,.2f} | {f_sum.get('B', {}).get('sales_pct', 0):.1f}% of sales)\n"
+                f"- **Class C [2.49 - 1.75]**: {f_sum.get('C', {}).get('count', 0)} SKUs "
+                f"(${f_sum.get('C', {}).get('total_sales', 0):,.2f} | {f_sum.get('C', {}).get('sales_pct', 0):.1f}% of sales)\n"
+                f"- **Class D [< 1.75]**: {f_sum.get('D', {}).get('count', 0)} SKUs "
+                f"(${f_sum.get('D', {}).get('total_sales', 0):,.2f} | {f_sum.get('D', {}).get('sales_pct', 0):.1f}% of sales)\n\n"
+                f"#### 2. Individual Sales ($) Pareto Breakdown (A: 0-60%, B: 61-80%, C: 81-90%, D: 91-100%):\n"
+                f"- **Class A (Score 4)**: {s_sum.get('A', {}).get('count', 0)} SKUs (${s_sum.get('A', {}).get('total_sales', 0):,.2f} | {s_sum.get('A', {}).get('sales_pct', 0):.1f}% of revenue)\n"
+                f"- **Class B (Score 3)**: {s_sum.get('B', {}).get('count', 0)} SKUs (${s_sum.get('B', {}).get('total_sales', 0):,.2f} | {s_sum.get('B', {}).get('sales_pct', 0):.1f}% of revenue)\n"
+                f"- **Class C (Score 2)**: {s_sum.get('C', {}).get('count', 0)} SKUs (${s_sum.get('C', {}).get('total_sales', 0):,.2f} | {s_sum.get('C', {}).get('sales_pct', 0):.1f}% of revenue)\n"
+                f"- **Class D (Score 1)**: {s_sum.get('D', {}).get('count', 0)} SKUs (${s_sum.get('D', {}).get('total_sales', 0):,.2f} | {s_sum.get('D', {}).get('sales_pct', 0):.1f}% of revenue)\n\n"
+                f"#### 3. Individual Hits / Movement Frequency Breakdown (A: 0-60%, B: 61-80%, C: 81-90%, D: 91-100%):\n"
+                f"- **Class A (Score 4)**: {h_sum.get('A', {}).get('count', 0)} SKUs ({h_sum.get('A', {}).get('total_hits', 0):,.0f} hits | {h_sum.get('A', {}).get('hits_pct', 0):.1f}% of activity)\n"
+                f"- **Class B (Score 3)**: {h_sum.get('B', {}).get('count', 0)} SKUs ({h_sum.get('B', {}).get('total_hits', 0):,.0f} hits | {h_sum.get('B', {}).get('hits_pct', 0):.1f}% of activity)\n"
+                f"- **Class C (Score 2)**: {h_sum.get('C', {}).get('count', 0)} SKUs ({h_sum.get('C', {}).get('total_hits', 0):,.0f} hits | {h_sum.get('C', {}).get('hits_pct', 0):.1f}% of activity)\n"
+                f"- **Class D (Score 1)**: {h_sum.get('D', {}).get('count', 0)} SKUs ({h_sum.get('D', {}).get('total_hits', 0):,.0f} hits | {h_sum.get('D', {}).get('hits_pct', 0):.1f}% of activity)\n\n"
+                f"#### 4. Matrix Cross-Tabulation (Sales Class × Hits Class):\n"
+                f"- **AA (Score 4.00)**: {mat.get('AA', 0)} SKUs — Critical high-value, high-velocity core drivers.\n"
+                f"- **AD (Score 2.95)**: {mat.get('AD', 0)} SKUs — High revenue with low pick frequency.\n"
+                f"- **DA (Score 2.05)**: {mat.get('DA', 0)} SKUs — Low revenue with high pick frequency.\n"
+                f"- **DD (Score 1.00)**: {mat.get('DD', 0)} SKUs — Long-tail slow movers."
+            )
+
+            recs = [
+                f"Prioritize replenishment and continuous review for Final Class A SKUs ({f_sum.get('A', {}).get('count', 0)} items, Score 3.25-4.00) targeting 98%+ cycle service level.",
+                f"Manage Final Class B SKUs ({f_sum.get('B', {}).get('count', 0)} items, Score 2.50-3.24) with standard periodic review and safety stock buffers.",
+                f"Control Final Class C SKUs ({f_sum.get('C', {}).get('count', 0)} items, Score 1.75-2.49) using simplified reorder points or two-bin replenishment for low-cost fast movers.",
+                f"Conduct obsolescence and minimum order quantity (MOQ) audits on Final Class D SKUs ({f_sum.get('D', {}).get('count', 0)} items, Score < 1.75)."
+            ]
+
         full_details = f"{eight_report_str}\n---\n{details}" if eight_report_str else details
         return (summary, full_details, recs)
+
+    def classify_inventory(
+        self,
+        items_data: Any,
+        item_col: Optional[str] = None,
+        name_col: Optional[str] = None,
+        uom_col: Optional[str] = None,
+        sales_col: Optional[str] = None,
+        hits_col: Optional[str] = None
+    ) -> tools.InventoryClassificationResult:
+        """
+        Directly classifies inventory items using Sales ($) and Hits (POS Hits).
+        Applies Pareto thresholds (A: 0-60%, B: 61-80%, C: 81-90%, D: 91-100%)
+        and converts classes to scores (A=4, B=3, C=2, D=1).
+        """
+        return tools.calculate_multicriteria_inventory_classification(
+            items_data=items_data,
+            item_col=item_col,
+            name_col=name_col,
+            uom_col=uom_col,
+            sales_col=sales_col,
+            hits_col=hits_col
+        )
